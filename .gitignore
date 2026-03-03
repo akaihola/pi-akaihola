@@ -1,0 +1,11 @@
+# Pi Pi — installed from upstream via `just install-pi-pi`, not committed here
+.pi/extensions/pi-pi.ts
+.pi/extensions/themeMap.ts
+.pi/agents/pi-pi/
+.pi/themes/rose-pine.json
+
+# Pi runtime/generated
+.pi/sessions/
+.pi/cache/
+.pi/logs/
+.pi/tmp/
