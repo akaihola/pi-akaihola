@@ -1,0 +1,4 @@
+{
+  "themes": ["themes"],
+  "extensions": ["extensions/pi-pi.ts", "extensions/orchestrator"]
+}
