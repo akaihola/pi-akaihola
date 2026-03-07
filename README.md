@@ -1,18 +1,16 @@
 # pi-akaihola
 
-A workspace for developing Pi extensions. Pi Pi is available here as a coding assistant to help build them.
+A monorepo for developing and distributing reusable Pi extension packages. Pi Pi is available here as a repo-local coding assistant to help build them.
 
 ---
 
-## Getting started (fresh clone)
+## Getting started
 
-Pi Pi is not committed to this repo. Install it from its source repo:
+Install the repo-local Pi Pi helper into `.pi/`:
 
 ```sh
 just install-pi-pi
 ```
-
-This copies the latest `pi-pi.ts`, `themeMap.ts`, agent definitions, and rose-pine theme from `~/repos/ai/pi/pi-vs-claude-code/` into `.pi/`. Run the same command to upgrade.
 
 Then start a session:
 
@@ -20,23 +18,39 @@ Then start a session:
 pi
 ```
 
-Pi Pi loads automatically from `.pi/extensions/` — no `-e` flag needed. Just describe what you want to build and it will research the Pi APIs and write the files for you.
+The local Pi session loads:
 
-This workspace also includes a `session-meta` extension that exposes the active Pi session path/UUID to the model and to slash commands. Use `/session-meta` to inspect the current session and `/session-stamp` to insert a metadata block into the editor for plans, notes, or commit footers.
+- `pi-pi` directly from `.pi/extensions/pi-pi.ts`
+- distributable extensions from `packages/` via `.pi/settings.json`
+
+That keeps `.pi/` as the workshop for this repository, while the reusable extension implementations live under `packages/`.
 
 ---
 
 ## Project layout
 
-```
+```text
 ~/prg/pi-akaihola/
-├── justfile                    ← install-pi-pi recipe
-├── .gitignore                  ← excludes only .pi/{sessions,cache,logs,tmp}/
-└── .pi/                        ← committed to git
+├── package.json                ← workspace root and optional meta-package entrypoint
+├── justfile                    ← helper recipes for local development
+├── packages/                   ← distributable Pi packages
+│   ├── pi-orchestrator/
+│   │   ├── package.json
+│   │   ├── README.md
+│   │   └── extensions/
+│   ├── pi-session-meta/
+│   │   ├── package.json
+│   │   ├── README.md
+│   │   └── extensions/
+│   └── pi-usage-bars/
+│       ├── package.json
+│       ├── README.md
+│       └── extensions/
+└── .pi/                        ← repo-local Pi config and authoring support
     ├── settings.json
     ├── extensions/
-    │   ├── pi-pi.ts            ← Pi Pi assistant
-    │   └── themeMap.ts         ← theme helper used by pi-pi.ts
+    │   ├── pi-pi.ts            ← local meta-agent helper, installed from upstream
+    │   └── themeMap.ts         ← helper used by pi-pi.ts
     ├── agents/
     │   └── pi-pi/              ← Pi Pi's expert sub-agent definitions
     └── themes/
@@ -45,32 +59,79 @@ This workspace also includes a `session-meta` extension that exposes the active 
 
 ---
 
-## What is Pi Pi?
+## Packages
 
-Pi Pi is a meta-agent that builds Pi components (extensions, themes, skills, agent definitions, prompt templates, settings). It is _not_ the subject of this workspace — it's the tool being used to develop whatever extensions end up living here.
+Current distributable packages:
+
+- `@akaihola/pi-session-meta` — exposes the current Pi session path, UUID, slug, and stamp commands
+- `@akaihola/pi-orchestrator` — runs researcher/planner/coder/orchestrator workflows in isolated Pi subprocesses
+- `@akaihola/pi-usage-bars` — shows Claude quota usage in the status bar using Claude Code Mux OAuth tokens
+
+Each package is independently installable and publishable.
+
+## Install options
+
+Use one package when you want a single feature:
+
+```sh
+pi install npm:@akaihola/pi-session-meta
+```
+
+Use a local package path when developing in this repo:
+
+```sh
+pi install -l ./packages/pi-session-meta
+```
+
+Use `-e` for a one-off smoke test without persisting settings:
+
+```sh
+pi -e ./packages/pi-session-meta
+```
+
+Use the whole repo when you want all packaged extensions exposed by the root meta-package:
+
+```sh
+pi install git:github.com/<you-or-org>/pi-akaihola
+```
+
+---
+
+## Publishing
+
+Publish an individual package with the manual GitHub Actions workflow in `.github/workflows/publish-package.yml`.
+
+Before running it:
+
+- add an `NPM_TOKEN` repository secret with publish access
+- bump the target package version in `packages/<name>/package.json`
+- choose the package directory from the workflow dispatch form
+
+The workflow validates the selected package manifest and runs `npm publish` from that package directory only.
+
+---
+
+## Local development model
+
+This repo uses a split layout:
+
+- `packages/` contains the actual reusable extension implementations
+- `.pi/` contains only repo-local Pi configuration, themes, agents, and helper extensions
+
+Think of it as workshop versus product:
+
+- `.pi/settings.json` is maintainer wiring for this monorepo only
+- `packages/*` is what downstream users install, publish, and depend on
+
+`.pi/settings.json` therefore uses `packages` entries pointing at `../packages/...` rather than treating `.pi/extensions/` as the source of distributable code.
+
+---
+
+## Pi Pi
+
+Pi Pi is a meta-agent that builds Pi components such as extensions, themes, skills, agent definitions, prompt templates, and settings. It is not the primary product of this repo; it is the local tool used to help author the packages that live here.
 
 It runs a two-phase workflow:
 
-1. **Research (parallel)** — dispatches queries to 9 domain-specific expert sub-agents, each spawned as a concurrent `pi --mode json` subprocess.
-2. **Build** — synthesises the findings and writes actual files using its code tools.
-
-### Expert roster
-
-| Expert              | Domain                                             |
-| ------------------- | -------------------------------------------------- |
-| `ext-expert`        | Extensions — tools, events, commands, rendering    |
-| `theme-expert`      | Themes — JSON format, 51 color tokens              |
-| `skill-expert`      | Skills — SKILL.md packages, frontmatter            |
-| `config-expert`     | Settings — settings.json, providers, models        |
-| `tui-expert`        | TUI — components, widgets, overlays, footers       |
-| `prompt-expert`     | Prompt templates — .md files, `$1`/`$@` args       |
-| `agent-expert`      | Agent definitions — .md personas, teams.yaml       |
-| `keybinding-expert` | Keyboard shortcuts — `registerShortcut()`, Key IDs |
-| `cli-expert`        | CLI flags and invocation                           |
-
-### UI
-
-- **Live expert-grid dashboard** — coloured cards per expert showing status, elapsed time, last output line
-- **Custom footer** — model name, active/done expert count, context usage bar
-- **Slash commands:** `/experts` (list status), `/experts-grid N` (set grid columns 1–5)
-- **Theme:** rose-pine (auto-applied on session start)
+1. **Research** — dispatches queries to domain-specific expert sub-agents in parallel
+2. **Build** — synthesises the findings and writes actual files using code tools

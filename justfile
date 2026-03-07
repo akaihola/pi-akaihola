@@ -10,9 +10,17 @@ default:
 pi-pi:
     pi -e .pi/extensions/pi-pi.ts
 
-# Run Pi with the orchestrator extension (multi-agent workflows)
+# Run Pi with the orchestrator package (multi-agent workflows)
 orchestrate:
-    pi -e .pi/extensions/orchestrator
+    pi -e ./packages/pi-orchestrator
+
+# Run Pi with the session-meta package
+session-meta:
+    pi -e ./packages/pi-session-meta
+
+# Run Pi with the usage-bars package
+usage-bars:
+    pi -e ./packages/pi-usage-bars
 
 # Install Pi Pi from the GitHub origin repo into .pi/ (safe to re-run; also upgrades)
 install-pi-pi:

@@ -1,8 +1,9 @@
 {
   "themes": ["themes"],
-  "extensions": [
-    "extensions/pi-pi.ts",
-    "extensions/orchestrator",
-    "extensions/session-meta.ts"
+  "extensions": ["extensions/pi-pi.ts"],
+  "packages": [
+    "../packages/pi-session-meta",
+    "../packages/pi-orchestrator",
+    "../packages/pi-usage-bars"
   ]
 }

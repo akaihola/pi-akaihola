@@ -1,0 +1,20 @@
+{
+  "name": "pi-akaihola",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extensions",
+    "pi-coding-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-session-meta/extensions",
+      "./packages/pi-orchestrator/extensions",
+      "./packages/pi-usage-bars/extensions"
+    ]
+  }
+}

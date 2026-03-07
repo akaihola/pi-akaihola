@@ -1,0 +1,19 @@
+{
+  "name": "@akaihola/pi-usage-bars",
+  "version": "0.1.0",
+  "description": "Pi extension showing Claude quota usage bars in the status bar",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "claude"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}

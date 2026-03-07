@@ -1,0 +1,40 @@
+name: Publish Pi Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package directory under packages/
+        required: true
+        type: choice
+        options:
+          - pi-session-meta
+          - pi-orchestrator
+          - pi-usage-bars
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate package manifest
+        run: node -e "const fs=require('fs'); const path='packages/${{ inputs.package }}/package.json'; const pkg=JSON.parse(fs.readFileSync(path,'utf8')); if(!pkg.name||!pkg.version){throw new Error('Missing name/version in '+path)}; console.log(pkg.name+'@'+pkg.version)"
+
+      - name: Publish package
+        working-directory: packages/${{ inputs.package }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

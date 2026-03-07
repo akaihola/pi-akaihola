@@ -6,7 +6,10 @@
  * Claude Code Mux) rather than requiring pi's own OAuth login.  Handles
  * token refresh automatically using Anthropic's public OAuth endpoint.
  *
- * Usage: pi -e ~/.pi/agent/extensions/usage-bars.ts
+ * Package entrypoint for @akaihola/pi-usage-bars.
+ * Install with `pi install npm:@akaihola/pi-usage-bars` or
+ * `pi install -l ./packages/pi-usage-bars`; for one-off testing, run
+ * `pi -e ./packages/pi-usage-bars`.
  *
  * Inspired by rho/extensions/usage-bars and steipete/CodexBar.
  */
