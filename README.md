@@ -22,6 +22,8 @@ pi
 
 Pi Pi loads automatically from `.pi/extensions/` — no `-e` flag needed. Just describe what you want to build and it will research the Pi APIs and write the files for you.
 
+This workspace also includes a `session-meta` extension that exposes the active Pi session path/UUID to the model and to slash commands. Use `/session-meta` to inspect the current session and `/session-stamp` to insert a metadata block into the editor for plans, notes, or commit footers.
+
 ---
 
 ## Project layout
