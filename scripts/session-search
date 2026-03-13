@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Search Pi and Claude Code sessions across all hosts/users.
 
-Usage:  session-search <pattern> [-i] [-w]
-  Tip:  session-search <pattern> | less -R
+Usage:
+  session-search <pattern> [-i] [-w]
+  session-search <pattern> --source 'host=gogo,user=agent,dirs=~/.pi/sessions,~/.claude/projects'
 
-In worker mode (invoked via SSH, not by users directly):
-  python3 - --worker [--tool pi|claude] [--ignore-case] [--ssh-prefix STR]
-             <pattern> <dir> [<dir> ...]
+Config file: ~/.config/session-search/sources.json (created on first run with example)
+
+Examples:
+  session-search "mailjail" | less -R
+  session-search Digitransit --source 'host=gogo,user=akaihola,dirs=~/.pi/sessions,tool=pi'
+  session-search foo --sources-file ./my-sources.json
 """
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -18,8 +23,10 @@ import sys
 from pathlib import Path
 from textwrap import shorten
 
+CONFIG_DIR = Path('~/.config/session-search').expanduser()
+DEFAULT_CONFIG_PATH = CONFIG_DIR / 'sources.json'
+
 # Force line-buffered stdout so local print()s appear before SSH subprocess output
-# even when stdout is piped (e.g. | less -R).
 sys.stdout.reconfigure(line_buffering=True)
 
 RESET = '\033[0m'
@@ -140,6 +147,52 @@ def iter_windows(msgs, rx: re.Pattern):
     return rendered
 
 
+def deduce_label(source: dict) -> str:
+    """Generate a label from source configuration."""
+    host = source.get('host')
+    user = source.get('user')
+    dirs = source.get('dirs', [])
+    tool_hint = source.get('tool')
+
+    parts = []
+
+    # Location part
+    if host:
+        parts.append(host)
+    else:
+        # Try to get hostname
+        try:
+            hostname = os.uname().nodename
+            parts.append(hostname)
+        except Exception:
+            parts.append('local')
+
+    # User part
+    if user:
+        parts.append(user)
+    else:
+        parts.append(os.environ.get('USER', 'user'))
+
+    # Tool part - deduce from dirs if not specified
+    if tool_hint:
+        parts.append(tool_hint)
+    elif dirs:
+        # Deduce from dir paths
+        dir_str = ' '.join(dirs)
+        if '.pi' in dir_str and '.claude' in dir_str:
+            parts.append('pi + claude')
+        elif '.pi' in dir_str:
+            parts.append('pi')
+        elif '.claude' in dir_str:
+            parts.append('claude')
+        else:
+            parts.append('sessions')
+    else:
+        parts.append('sessions')
+
+    return ' • '.join(parts)
+
+
 def process_file(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str) -> bool:
     try:
         if tool == 'pi':
@@ -171,7 +224,8 @@ def process_file(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str) -> bool
     return True
 
 
-def worker(pattern: str, dirs: list[str], flags: int, tool_hint: str | None, ssh_prefix: str) -> None:
+def worker(pattern: str, dirs: list[str], flags: int, tool_hint: str | None,
+           ssh_prefix: str, label: str) -> None:
     rx = re.compile(pattern, flags)
     found = False
     for d in dirs:
@@ -192,31 +246,155 @@ def worker(pattern: str, dirs: list[str], flags: int, tool_hint: str | None, ssh
             if process_file(f, tool, rx, ssh_prefix):
                 found = True
     if not found:
-        print('  (no matches)')
-
-
-SOURCES = [
-    ('atom • akaihola • pi', None, None, ['~/.pi/agent/sessions'], 'pi'),
-    ('atom • akaihola • claude', None, None, ['~/.claude/projects'], 'claude'),
-    ('gogo • akaihola • pi', 'gogo', 'akaihola', ['~/.pi/agent/sessions'], 'pi'),
-    ('gogo • agent • pi + claude', 'gogo', 'agent', ['~/.pi/agent/sessions', '~/.claude/projects'], None),
-]
+        print(f'  (no matches)')
 
 
 def hdr(label: str) -> None:
     print(f'\n{BOLD}{CYAN}══ {label} ══{RESET}')
 
 
-def orchestrate(pattern: str, flags: int) -> None:
-    self_code = Path(__file__).read_text()
-    for label, host, user, dirs, tool_hint in SOURCES:
-        hdr(label)
-        if host is None:
-            expanded = [str(Path(d).expanduser()) for d in dirs]
-            worker(pattern, expanded, flags, tool_hint, '')
+def parse_inline_source(source_str: str) -> dict:
+    """Parse inline source string like 'host=gogo,user=agent,dirs=~/.pi/sessions,~/.claude/projects,tool=pi'."""
+    source = {}
+    parts = source_str.split(',')
+
+    for part in parts:
+        if '=' in part:
+            key, value = part.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key == 'dirs':
+                # dirs can be comma-separated list, but we already split by comma
+                # So we handle dirs specially: accumulate until next key
+                continue
+            elif key == 'host':
+                source['host'] = value if value else None
+            elif key == 'user':
+                source['user'] = value if value else None
+            elif key == 'tool':
+                source['tool'] = value if value else None
+            elif key == 'label':
+                source['label'] = value
+
+    # Handle dirs specially - collect all non-key=value parts as dirs
+    dirs = []
+    for part in parts:
+        if '=' not in part:
+            dirs.append(part.strip())
+        elif part.strip().startswith('dirs='):
+            # dirs=value format
+            dirs_str = part.split('=', 1)[1].strip()
+            dirs.extend(d.split(',') for d in dirs_str.split(',') if d.strip())
+
+    if dirs:
+        source['dirs'] = dirs
+
+    return source
+
+
+def get_sources(args) -> list[dict]:
+    """Get sources from config file, CLI args, or defaults."""
+    sources = []
+
+    # First, try config file
+    config_path = Path(args.sources_file).expanduser() if args.sources_file else DEFAULT_CONFIG_PATH
+
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    sources = data
+                elif isinstance(data, dict) and 'sources' in data:
+                    sources = data['sources']
+        except (json.JSONDecodeError, IOError) as e:
+            print(f'Warning: could not read config {config_path}: {e}', file=sys.stderr)
+
+    # Add inline sources from CLI
+    for source_str in args.source or []:
+        sources.append(parse_inline_source(source_str))
+
+    # If still no sources, use defaults (local only, no personal info)
+    if not sources:
+        sources = [
+            {
+                'host': None,
+                'user': None,
+                'dirs': ['~/.pi/agent/sessions'],
+                'tool': 'pi'
+            },
+            {
+                'host': None,
+                'user': None,
+                'dirs': ['~/.claude/projects'],
+                'tool': 'claude'
+            }
+        ]
+
+    # Validate and fill in labels
+    for source in sources:
+        if 'dirs' not in source or not source['dirs']:
+            print(f'Warning: source missing dirs: {source}', file=sys.stderr)
             continue
-        ssh_host = f'{user}@{host}' if user != 'akaihola' else host
+
+        if 'label' not in source:
+            source['label'] = deduce_label(source)
+
+    return sources
+
+
+def write_example_config():
+    """Create example config file if it doesn't exist."""
+    if DEFAULT_CONFIG_PATH.exists():
+        return
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    example = [
+        {
+            'label': 'local • pi',
+            'host': None,
+            'user': None,
+            'dirs': ['~/.pi/agent/sessions'],
+            'tool': 'pi'
+        },
+        {
+            'label': 'local • claude',
+            'host': None,
+            'user': None,
+            'dirs': ['~/.claude/projects'],
+            'tool': 'claude'
+        }
+    ]
+
+    with open(DEFAULT_CONFIG_PATH, 'w') as f:
+        json.dump(example, f, indent=2)
+
+
+def orchestrate(pattern: str, flags: int, args) -> None:
+    self_code = Path(__file__).read_text()
+    sources = get_sources(args)
+
+    for source in sources:
+        label = source.get('label', deduce_label(source))
+        hdr(label)
+
+        host = source.get('host')
+        user = source.get('user')
+        dirs = source.get('dirs', [])
+        tool_hint = source.get('tool')
+
+        if host is None:
+            # Local source
+            expanded = [str(Path(d).expanduser()) for d in dirs]
+            worker(pattern, expanded, flags, tool_hint, '', label)
+            continue
+
+        # Remote source
+        ssh_host = f'{user}@{host}' if user else host
         ssh_prefix = f'ssh -t {ssh_host}'
+
         remote_argv = ['python3', '-', '--worker']
         if tool_hint:
             remote_argv += ['--tool', tool_hint]
@@ -224,17 +402,45 @@ def orchestrate(pattern: str, flags: int) -> None:
             remote_argv.append('--ignore-case')
         remote_argv += ['--ssh-prefix', ssh_prefix, pattern]
         remote_cmd = ' '.join(shlex.quote(a) for a in remote_argv) + ' ' + ' '.join(dirs)
+
         try:
-            subprocess.run(['ssh', '-q', ssh_host, remote_cmd], input=self_code.encode(), check=False)
+            subprocess.run(['ssh', '-q', ssh_host, remote_cmd],
+                           input=self_code.encode(), check=False)
         except Exception as e:
             print(f'  {DIM}(ssh failed: {e}){RESET}')
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Search Pi and Claude Code sessions across all hosts.')
+    write_example_config()
+
+    ap = argparse.ArgumentParser(
+        description='Search Pi and Claude Code sessions across all hosts.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  session-search "keyword" | less -R
+  session-search keyword --source 'host=server,user=dev,dirs=~/.pi/sessions'
+  session-search keyword --sources-file ./custom-sources.json
+
+Config file format (~/.config/session-search/sources.json):
+  [
+    {
+      "label": "optional custom label",
+      "host": "remote-host-or-null",
+      "user": "remote-user-or-null",
+      "dirs": ["~/.pi/agent/sessions"],
+      "tool": "pi"
+    }
+  ]
+''')
     ap.add_argument('pattern', help='regex pattern to search for')
     ap.add_argument('-i', '--ignore-case', action='store_true')
-    ap.add_argument('-w', '--word-regexp', action='store_true', help='match whole words only')
+    ap.add_argument('-w', '--word-regexp', action='store_true',
+                    help='match whole words only')
+    ap.add_argument('--source', action='append', metavar='SPEC',
+                    help='add source via CLI (format: host=H,user=U,dirs=D1,D2,tool=T)')
+    ap.add_argument('--sources-file', metavar='PATH',
+                    help='path to sources JSON config (default: ~/.config/session-search/sources.json)')
     ap.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--tool', choices=['pi', 'claude'], default=None, help=argparse.SUPPRESS)
     ap.add_argument('--ssh-prefix', default='', dest='ssh_prefix', help=argparse.SUPPRESS)
@@ -245,9 +451,9 @@ def main() -> None:
     pat = rf'\b{re.escape(args.pattern)}\b' if args.word_regexp else args.pattern
 
     if args.worker:
-        worker(pat, args.dirs, flags, args.tool, args.ssh_prefix)
+        worker(pat, args.dirs, flags, args.tool, args.ssh_prefix, 'worker')
     else:
-        orchestrate(pat, flags)
+        orchestrate(pat, flags, args)
 
 
 if __name__ == '__main__':
