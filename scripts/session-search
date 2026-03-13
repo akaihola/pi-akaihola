@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Search Pi and Claude Code sessions across all hosts/users.
+
+Usage:  session-search <pattern> [-i] [-w]
+  Tip:  session-search <pattern> | less -R
+
+In worker mode (invoked via SSH, not by users directly):
+  python3 - --worker [--tool pi|claude] [--ignore-case] [--ssh-prefix STR]
+             <pattern> <dir> [<dir> ...]
+"""
+
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import shorten
+
+# Force line-buffered stdout so local print()s appear before SSH subprocess output
+# even when stdout is piped (e.g. | less -R).
+sys.stdout.reconfigure(line_buffering=True)
+
+RESET = '\033[0m'
+BOLD = '\033[1m'
+DIM = '\033[2m'
+RED = '\033[31m'
+GREEN = '\033[32m'
+YELLOW = '\033[33m'
+CYAN = '\033[36m'
+
+
+def extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return '\n'.join(
+            item['text']
+            for item in content
+            if isinstance(item, dict) and item.get('type') == 'text'
+        )
+    return ''
+
+
+_META = re.compile(r'<(local-command|command-name|command-message|local-command-stdout)')
+
+
+def is_meta(text: str) -> bool:
+    return bool(_META.search(text))
+
+
+def parse_pi(path: Path):
+    sid = cwd = None
+    msgs = []
+    for raw in path.read_text(errors='replace').splitlines():
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if d.get('type') == 'session':
+            sid, cwd = d.get('id'), d.get('cwd', '')
+        elif d.get('type') == 'message':
+            m = d.get('message', {})
+            role = m.get('role', '')
+            if role in ('user', 'assistant'):
+                text = extract_text(m.get('content', '')).strip()
+                if text:
+                    msgs.append((role, text))
+    return sid, cwd or '', msgs
+
+
+def parse_claude(path: Path):
+    sid = path.stem
+    cwd = None
+    msgs = []
+    for raw in path.read_text(errors='replace').splitlines():
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if cwd is None:
+            cwd = d.get('cwd', '')
+        if d.get('type') not in ('user', 'assistant'):
+            continue
+        m = d.get('message', {})
+        role = m.get('role', '')
+        if role not in ('user', 'assistant'):
+            continue
+        text = extract_text(m.get('content', '')).strip()
+        if text and not is_meta(text):
+            msgs.append((role, text))
+    return sid, cwd or '', msgs
+
+
+def head(text: str, width=90) -> str:
+    for ln in text.splitlines():
+        if s := ln.strip():
+            return shorten(s, width=width, placeholder='…')
+    return ''
+
+
+def icon(role: str) -> str:
+    return f'{GREEN}▶{RESET}' if role == 'user' else f'{YELLOW}◀{RESET}'
+
+
+def format_line(role: str, line: str, rx: re.Pattern, *, matched: bool, dim: bool) -> str:
+    prefix = icon(role)
+    text = rx.sub(BOLD + RED + r'\g<0>' + RESET, line) if matched else line
+    if dim:
+        return f'  {DIM}{prefix} {text}{RESET}'
+    return f'  {prefix} {text}'
+
+
+def iter_windows(msgs, rx: re.Pattern):
+    rendered = []
+    for role, text in msgs:
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        if not lines:
+            continue
+        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+        if not hits:
+            continue
+        keep = set()
+        for i in hits:
+            keep.update(range(max(0, i - 1), min(len(lines), i + 2)))
+        for i, line in enumerate(lines):
+            if i not in keep:
+                continue
+            rendered.append((role, line, i in hits))
+        rendered.append(None)
+    while rendered and rendered[-1] is None:
+        rendered.pop()
+    return rendered
+
+
+def process_file(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str) -> bool:
+    try:
+        if tool == 'pi':
+            sid, cwd, msgs = parse_pi(path)
+        else:
+            sid, cwd, msgs = parse_claude(path)
+    except Exception as e:
+        print(f'  {DIM}(skip {path.name}: {e}){RESET}')
+        return False
+
+    windows = iter_windows(msgs, rx)
+    if not windows:
+        return False
+
+    title = head(next((t for r, t in msgs if r == 'user'), '(no prompt)'))
+    print(f'\n  {BOLD}{CYAN}{path.name}{RESET}  {DIM}{cwd}{RESET}')
+    print(f'  {DIM}"{title}"{RESET}')
+
+    for entry in windows:
+        if entry is None:
+            print(f'  {DIM}──{RESET}')
+            continue
+        role, line, matched = entry
+        print(format_line(role, line, rx, matched=matched, dim=not matched))
+
+    local_cmd = f'pi --session {path}' if tool == 'pi' else f'claude -r {sid}'
+    resume = f'{ssh_prefix} "{local_cmd}"' if ssh_prefix else local_cmd
+    print(f'\n  {BOLD}$ {resume}{RESET}')
+    return True
+
+
+def worker(pattern: str, dirs: list[str], flags: int, tool_hint: str | None, ssh_prefix: str) -> None:
+    rx = re.compile(pattern, flags)
+    found = False
+    for d in dirs:
+        p = Path(d).expanduser()
+        if not p.is_dir():
+            continue
+        for f in sorted(p.rglob('*.jsonl')):
+            if '.git' in f.parts:
+                continue
+            if tool_hint:
+                tool = tool_hint
+            elif '.pi' in f.parts:
+                tool = 'pi'
+            elif '.claude' in f.parts:
+                tool = 'claude'
+            else:
+                continue
+            if process_file(f, tool, rx, ssh_prefix):
+                found = True
+    if not found:
+        print('  (no matches)')
+
+
+SOURCES = [
+    ('atom • akaihola • pi', None, None, ['~/.pi/agent/sessions'], 'pi'),
+    ('atom • akaihola • claude', None, None, ['~/.claude/projects'], 'claude'),
+    ('gogo • akaihola • pi', 'gogo', 'akaihola', ['~/.pi/agent/sessions'], 'pi'),
+    ('gogo • agent • pi + claude', 'gogo', 'agent', ['~/.pi/agent/sessions', '~/.claude/projects'], None),
+]
+
+
+def hdr(label: str) -> None:
+    print(f'\n{BOLD}{CYAN}══ {label} ══{RESET}')
+
+
+def orchestrate(pattern: str, flags: int) -> None:
+    self_code = Path(__file__).read_text()
+    for label, host, user, dirs, tool_hint in SOURCES:
+        hdr(label)
+        if host is None:
+            expanded = [str(Path(d).expanduser()) for d in dirs]
+            worker(pattern, expanded, flags, tool_hint, '')
+            continue
+        ssh_host = f'{user}@{host}' if user != 'akaihola' else host
+        ssh_prefix = f'ssh -t {ssh_host}'
+        remote_argv = ['python3', '-', '--worker']
+        if tool_hint:
+            remote_argv += ['--tool', tool_hint]
+        if flags & re.IGNORECASE:
+            remote_argv.append('--ignore-case')
+        remote_argv += ['--ssh-prefix', ssh_prefix, pattern]
+        remote_cmd = ' '.join(shlex.quote(a) for a in remote_argv) + ' ' + ' '.join(dirs)
+        try:
+            subprocess.run(['ssh', '-q', ssh_host, remote_cmd], input=self_code.encode(), check=False)
+        except Exception as e:
+            print(f'  {DIM}(ssh failed: {e}){RESET}')
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description='Search Pi and Claude Code sessions across all hosts.')
+    ap.add_argument('pattern', help='regex pattern to search for')
+    ap.add_argument('-i', '--ignore-case', action='store_true')
+    ap.add_argument('-w', '--word-regexp', action='store_true', help='match whole words only')
+    ap.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    ap.add_argument('--tool', choices=['pi', 'claude'], default=None, help=argparse.SUPPRESS)
+    ap.add_argument('--ssh-prefix', default='', dest='ssh_prefix', help=argparse.SUPPRESS)
+    ap.add_argument('dirs', nargs='*', help=argparse.SUPPRESS)
+    args = ap.parse_args()
+
+    flags = re.IGNORECASE if args.ignore_case else 0
+    pat = rf'\b{re.escape(args.pattern)}\b' if args.word_regexp else args.pattern
+
+    if args.worker:
+        worker(pat, args.dirs, flags, args.tool, args.ssh_prefix)
+    else:
+        orchestrate(pat, flags)
+
+
+if __name__ == '__main__':
+    main()
