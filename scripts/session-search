@@ -131,6 +131,8 @@ def iter_windows(msgs, rx: re.Pattern):
         for i, line in enumerate(lines):
             if i not in keep:
                 continue
+            if i not in hits and not line.strip():
+                continue
             rendered.append((role, line, i in hits))
         rendered.append(None)
     while rendered and rendered[-1] is None:
