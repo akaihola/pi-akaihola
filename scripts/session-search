@@ -3,15 +3,18 @@
 
 Usage:
   session-search <pattern> [-i] [-w]
+  session-search <pattern> --interactive
   session-search <pattern> --source 'host=gogo,user=agent,dirs=~/.pi/sessions,~/.claude/projects'
 
 Config file: ~/.config/session-search/sources.json (created on first run with example)
 
 Examples:
   session-search "mailjail" | less -R
-  session-search Digitransit --source 'host=gogo,user=akaihola,dirs=~/.pi/sessions,tool=pi'
+  session-search Digitransit --interactive
   session-search foo --sources-file ./my-sources.json
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -20,37 +23,81 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import shorten
 
-CONFIG_DIR = Path('~/.config/session-search').expanduser()
-DEFAULT_CONFIG_PATH = CONFIG_DIR / 'sources.json'
+CONFIG_DIR = Path("~/.config/session-search").expanduser()
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "sources.json"
 
 # Force line-buffered stdout so local print()s appear before SSH subprocess output
 sys.stdout.reconfigure(line_buffering=True)
 
-RESET = '\033[0m'
-BOLD = '\033[1m'
-DIM = '\033[2m'
-RED = '\033[31m'
-GREEN = '\033[32m'
-YELLOW = '\033[33m'
-CYAN = '\033[36m'
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+
+@dataclass
+class Message:
+    role: str
+    text: str
+
+
+@dataclass
+class MatchLine:
+    role: str
+    line: str
+    matched: bool
+    line_index: int
+    message_index: int
+
+
+@dataclass
+class SourceError:
+    source_label: str
+    ssh_host: str
+    reason: str
+    detail: str = ""
+
+
+@dataclass
+class SessionResult:
+    source_label: str
+    tool: str
+    path: str
+    sid: str | None
+    cwd: str
+    title: str
+    ssh_prefix: str
+    messages: list[Message]
+    windows: list[MatchLine | None]
+    match_count: int
+    first_match: str
+
+    @property
+    def resume_command(self) -> str:
+        local_cmd = f"pi --session {self.path}" if self.tool == "pi" else f"claude -r {self.sid}"
+        return f'{self.ssh_prefix} "{local_cmd}"' if self.ssh_prefix else local_cmd
 
 
 def extract_text(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return '\n'.join(
-            item['text']
+        return "\n".join(
+            item["text"]
             for item in content
-            if isinstance(item, dict) and item.get('type') == 'text'
+            if isinstance(item, dict) and item.get("type") == "text"
         )
-    return ''
+    return ""
 
 
-_META = re.compile(r'<(local-command|command-name|command-message|local-command-stdout)')
+_META = re.compile(r"<(local-command|command-name|command-message|local-command-stdout)")
 
 
 def is_meta(text: str) -> bool:
@@ -60,30 +107,31 @@ def is_meta(text: str) -> bool:
 def parse_pi(path: Path):
     sid = cwd = None
     msgs = []
-    for raw in path.read_text(errors='replace').splitlines():
+    for raw in path.read_text(errors="replace").splitlines():
         if not raw:
             continue
         try:
             d = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if d.get('type') == 'session':
-            sid, cwd = d.get('id'), d.get('cwd', '')
-        elif d.get('type') == 'message':
-            m = d.get('message', {})
-            role = m.get('role', '')
-            if role in ('user', 'assistant'):
-                text = extract_text(m.get('content', '')).strip()
+        if d.get("type") == "session":
+            sid, cwd = d.get("id"), d.get("cwd", "")
+        elif d.get("type") == "message":
+            m = d.get("message", {})
+            role = m.get("role", "")
+            if role in ("user", "assistant"):
+                text = extract_text(m.get("content", "")).strip()
                 if text:
-                    msgs.append((role, text))
-    return sid, cwd or '', msgs
+                    msgs.append(Message(role, text))
+    return sid, cwd or "", msgs
+
 
 
 def parse_claude(path: Path):
     sid = path.stem
     cwd = None
     msgs = []
-    for raw in path.read_text(errors='replace').splitlines():
+    for raw in path.read_text(errors="replace").splitlines():
         if not raw:
             continue
         try:
@@ -91,42 +139,46 @@ def parse_claude(path: Path):
         except json.JSONDecodeError:
             continue
         if cwd is None:
-            cwd = d.get('cwd', '')
-        if d.get('type') not in ('user', 'assistant'):
+            cwd = d.get("cwd", "")
+        if d.get("type") not in ("user", "assistant"):
             continue
-        m = d.get('message', {})
-        role = m.get('role', '')
-        if role not in ('user', 'assistant'):
+        m = d.get("message", {})
+        role = m.get("role", "")
+        if role not in ("user", "assistant"):
             continue
-        text = extract_text(m.get('content', '')).strip()
+        text = extract_text(m.get("content", "")).strip()
         if text and not is_meta(text):
-            msgs.append((role, text))
-    return sid, cwd or '', msgs
+            msgs.append(Message(role, text))
+    return sid, cwd or "", msgs
+
 
 
 def head(text: str, width=90) -> str:
     for ln in text.splitlines():
         if s := ln.strip():
-            return shorten(s, width=width, placeholder='…')
-    return ''
+            return shorten(s, width=width, placeholder="…")
+    return ""
+
 
 
 def icon(role: str) -> str:
-    return f'{GREEN}▶{RESET}' if role == 'user' else f'{YELLOW}◀{RESET}'
+    return f"{GREEN}▶{RESET}" if role == "user" else f"{YELLOW}◀{RESET}"
+
 
 
 def format_line(role: str, line: str, rx: re.Pattern, *, matched: bool, dim: bool) -> str:
     prefix = icon(role)
-    text = rx.sub(BOLD + RED + r'\g<0>' + RESET, line) if matched else line
+    text = rx.sub(BOLD + RED + r"\g<0>" + RESET, line) if matched else line
     if dim:
-        return f'  {DIM}{prefix} {text}{RESET}'
-    return f'  {prefix} {text}'
+        return f"  {DIM}{prefix} {text}{RESET}"
+    return f"  {prefix} {text}"
 
 
-def iter_windows(msgs, rx: re.Pattern):
-    rendered = []
-    for role, text in msgs:
-        lines = [ln.rstrip() for ln in text.splitlines()]
+
+def iter_windows(msgs: list[Message], rx: re.Pattern):
+    rendered: list[MatchLine | None] = []
+    for message_index, msg in enumerate(msgs):
+        lines = [ln.rstrip() for ln in msg.text.splitlines()]
         if not lines:
             continue
         hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
@@ -140,164 +192,334 @@ def iter_windows(msgs, rx: re.Pattern):
                 continue
             if i not in hits and not line.strip():
                 continue
-            rendered.append((role, line, i in hits))
+            rendered.append(
+                MatchLine(
+                    role=msg.role,
+                    line=line,
+                    matched=i in hits,
+                    line_index=i,
+                    message_index=message_index,
+                )
+            )
         rendered.append(None)
     while rendered and rendered[-1] is None:
         rendered.pop()
     return rendered
 
 
+
 def deduce_label(source: dict) -> str:
     """Generate a label from source configuration."""
-    host = source.get('host')
-    user = source.get('user')
-    dirs = source.get('dirs', [])
-    tool_hint = source.get('tool')
+    host = source.get("host")
+    user = source.get("user")
+    dirs = source.get("dirs", [])
+    tool_hint = source.get("tool")
 
     parts = []
 
-    # Location part
     if host:
         parts.append(host)
     else:
-        # Try to get hostname
         try:
             hostname = os.uname().nodename
             parts.append(hostname)
         except Exception:
-            parts.append('local')
+            parts.append("local")
 
-    # User part
     if user:
         parts.append(user)
     else:
-        parts.append(os.environ.get('USER', 'user'))
+        parts.append(os.environ.get("USER", "user"))
 
-    # Tool part - deduce from dirs if not specified
     if tool_hint:
         parts.append(tool_hint)
     elif dirs:
-        # Deduce from dir paths
-        dir_str = ' '.join(dirs)
-        if '.pi' in dir_str and '.claude' in dir_str:
-            parts.append('pi + claude')
-        elif '.pi' in dir_str:
-            parts.append('pi')
-        elif '.claude' in dir_str:
-            parts.append('claude')
+        dir_str = " ".join(dirs)
+        if ".pi" in dir_str and ".claude" in dir_str:
+            parts.append("pi + claude")
+        elif ".pi" in dir_str:
+            parts.append("pi")
+        elif ".claude" in dir_str:
+            parts.append("claude")
         else:
-            parts.append('sessions')
+            parts.append("sessions")
     else:
-        parts.append('sessions')
+        parts.append("sessions")
 
-    return ' • '.join(parts)
+    return " • ".join(parts)
 
 
-def process_file(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str) -> bool:
+
+def build_result(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str, source_label: str) -> SessionResult | None:
     try:
-        if tool == 'pi':
+        if tool == "pi":
             sid, cwd, msgs = parse_pi(path)
         else:
             sid, cwd, msgs = parse_claude(path)
-    except Exception as e:
-        print(f'  {DIM}(skip {path.name}: {e}){RESET}')
-        return False
+    except Exception:
+        return None
 
     windows = iter_windows(msgs, rx)
     if not windows:
+        return None
+
+    title = head(next((m.text for m in msgs if m.role == "user"), "(no prompt)"))
+    match_lines = [entry for entry in windows if entry is not None and entry.matched]
+    first_match = head(match_lines[0].line, width=120) if match_lines else ""
+    return SessionResult(
+        source_label=source_label,
+        tool=tool,
+        path=str(path),
+        sid=sid,
+        cwd=cwd,
+        title=title,
+        ssh_prefix=ssh_prefix,
+        messages=msgs,
+        windows=windows,
+        match_count=len(match_lines),
+        first_match=first_match,
+    )
+
+
+
+def process_file(path: Path, tool: str, rx: re.Pattern, ssh_prefix: str, source_label: str) -> bool:
+    result = build_result(path, tool, rx, ssh_prefix, source_label)
+    if result is None:
         return False
 
-    title = head(next((t for r, t in msgs if r == 'user'), '(no prompt)'))
-    print(f'\n  {BOLD}{CYAN}{path.name}{RESET}  {DIM}{cwd}{RESET}')
-    print(f'  {DIM}"{title}"{RESET}')
+    print(f"\n  {BOLD}{CYAN}{Path(result.path).name}{RESET}  {DIM}{result.cwd}{RESET}")
+    print(f'  {DIM}"{result.title}"{RESET}')
 
-    for entry in windows:
+    for entry in result.windows:
         if entry is None:
-            print(f'  {DIM}──{RESET}')
+            print(f"  {DIM}──{RESET}")
             continue
-        role, line, matched = entry
-        print(format_line(role, line, rx, matched=matched, dim=not matched))
+        print(format_line(entry.role, entry.line, rx, matched=entry.matched, dim=not entry.matched))
 
-    local_cmd = f'pi --session {path}' if tool == 'pi' else f'claude -r {sid}'
-    resume = f'{ssh_prefix} "{local_cmd}"' if ssh_prefix else local_cmd
-    print(f'\n  {BOLD}$ {resume}{RESET}')
+    print(f"\n  {BOLD}$ {result.resume_command}{RESET}")
     return True
+
 
 
 def worker(pattern: str, dirs: list[str], flags: int, tool_hint: str | None,
            ssh_prefix: str, label: str) -> None:
+    results = collect_source_results(pattern, flags, dirs, tool_hint, ssh_prefix, label)
+    if not results:
+        print("  (no matches)")
+        return
+
     rx = re.compile(pattern, flags)
-    found = False
+    for result in results:
+        print(f"\n  {BOLD}{CYAN}{Path(result.path).name}{RESET}  {DIM}{result.cwd}{RESET}")
+        print(f'  {DIM}"{result.title}"{RESET}')
+
+        for entry in result.windows:
+            if entry is None:
+                print(f"  {DIM}──{RESET}")
+                continue
+            print(format_line(entry.role, entry.line, rx, matched=entry.matched, dim=not entry.matched))
+
+        print(f"\n  {BOLD}$ {result.resume_command}{RESET}")
+
+
+
+def dump_json_results(pattern: str, dirs: list[str], flags: int, tool_hint: str | None,
+                      ssh_prefix: str, label: str) -> None:
+    results = collect_source_results(pattern, flags, dirs, tool_hint, ssh_prefix, label)
+    payload = []
+    for result in results:
+        payload.append({
+            "source_label": result.source_label,
+            "tool": result.tool,
+            "path": result.path,
+            "sid": result.sid,
+            "cwd": result.cwd,
+            "title": result.title,
+            "ssh_prefix": result.ssh_prefix,
+            "messages": [{"role": m.role, "text": m.text} for m in result.messages],
+            "windows": [
+                None if entry is None else {
+                    "role": entry.role,
+                    "line": entry.line,
+                    "matched": entry.matched,
+                    "line_index": entry.line_index,
+                    "message_index": entry.message_index,
+                }
+                for entry in result.windows
+            ],
+            "match_count": result.match_count,
+            "first_match": result.first_match,
+        })
+    print(json.dumps(payload))
+
+
+
+def collect_source_results(pattern: str, flags: int, dirs: list[str], tool_hint: str | None,
+                           ssh_prefix: str, label: str) -> list[SessionResult]:
+    rx = re.compile(pattern, flags)
+    results: list[SessionResult] = []
+
     for d in dirs:
         p = Path(d).expanduser()
         if not p.is_dir():
             continue
-        for f in sorted(p.rglob('*.jsonl')):
-            if '.git' in f.parts:
+        for f in sorted(p.rglob("*.jsonl")):
+            if ".git" in f.parts:
                 continue
             if tool_hint:
                 tool = tool_hint
-            elif '.pi' in f.parts:
-                tool = 'pi'
-            elif '.claude' in f.parts:
-                tool = 'claude'
+            elif ".pi" in f.parts:
+                tool = "pi"
+            elif ".claude" in f.parts:
+                tool = "claude"
             else:
                 continue
-            if process_file(f, tool, rx, ssh_prefix):
-                found = True
-    if not found:
-        print(f'  (no matches)')
+            result = build_result(f, tool, rx, ssh_prefix, label)
+            if result is not None:
+                results.append(result)
+
+    return results
+
+
+
+def collect_remote_results(
+    pattern: str, flags: int, source: dict
+) -> tuple[list[SessionResult], SourceError | None]:
+    label = source.get("label", deduce_label(source))
+    host = source.get("host")
+    user = source.get("user")
+    dirs = source.get("dirs", [])
+    tool_hint = source.get("tool")
+    ssh_host = f"{user}@{host}" if user else host
+    ssh_prefix = f"ssh -t {ssh_host}"
+
+    remote_argv = ["python3", "-", "--dump-json"]
+    if tool_hint:
+        remote_argv += ["--tool", tool_hint]
+    if flags & re.IGNORECASE:
+        remote_argv.append("--ignore-case")
+    remote_argv += ["--ssh-prefix", ssh_prefix, "--label", label, pattern]
+    remote_argv += dirs
+    remote_cmd = " ".join(shlex.quote(a) for a in remote_argv)
+
+    try:
+        proc = subprocess.run(
+            ["ssh", "-q", ssh_host, remote_cmd],
+            input=Path(__file__).read_text().encode(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except Exception as exc:
+        return [], SourceError(label, ssh_host, "SSH launch failed", str(exc))
+
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip()
+        return [], SourceError(label, ssh_host, f"SSH exited with code {proc.returncode}", detail)
+
+    raw_stdout = proc.stdout.decode(errors="replace").strip()
+    try:
+        payload = json.loads(raw_stdout or "[]")
+    except json.JSONDecodeError as exc:
+        snippet = raw_stdout[:200] + ("…" if len(raw_stdout) > 200 else "")
+        return [], SourceError(label, ssh_host, "JSON parse error", f"{exc}\n\nOutput:\n{snippet}")
+
+    results: list[SessionResult] = []
+    for item in payload:
+        messages = [Message(**message) for message in item.get("messages", [])]
+        windows = [MatchLine(**entry) if entry is not None else None for entry in item.get("windows", [])]
+        results.append(
+            SessionResult(
+                source_label=item["source_label"],
+                tool=item["tool"],
+                path=item["path"],
+                sid=item.get("sid"),
+                cwd=item.get("cwd", ""),
+                title=item.get("title", ""),
+                ssh_prefix=item.get("ssh_prefix", ssh_prefix),
+                messages=messages,
+                windows=windows,
+                match_count=item.get("match_count", 0),
+                first_match=item.get("first_match", ""),
+            )
+        )
+    return results, None
+
+
+
+def collect_results(
+    pattern: str, flags: int, args
+) -> tuple[list[SessionResult], list[SourceError]]:
+    results: list[SessionResult] = []
+    errors: list[SourceError] = []
+    sources = get_sources(args)
+
+    for source in sources:
+        label = source.get("label", deduce_label(source))
+        host = source.get("host")
+        dirs = source.get("dirs", [])
+        tool_hint = source.get("tool")
+
+        if host is None:
+            expanded = [str(Path(d).expanduser()) for d in dirs]
+            results.extend(collect_source_results(pattern, flags, expanded, tool_hint, "", label))
+        else:
+            remote_results, error = collect_remote_results(pattern, flags, source)
+            results.extend(remote_results)
+            if error:
+                errors.append(error)
+
+    results.sort(key=lambda item: (item.source_label, Path(item.path).name))
+    return results, errors
+
 
 
 def hdr(label: str) -> None:
-    print(f'\n{BOLD}{CYAN}══ {label} ══{RESET}')
+    print(f"\n{BOLD}{CYAN}══ {label} ══{RESET}")
+
 
 
 def parse_inline_source(source_str: str) -> dict:
     """Parse inline source string like 'host=gogo,user=agent,dirs=~/.pi/sessions,~/.claude/projects,tool=pi'."""
     source = {}
-    parts = source_str.split(',')
+    parts = source_str.split(",")
 
     for part in parts:
-        if '=' in part:
-            key, value = part.split('=', 1)
+        if "=" in part:
+            key, value = part.split("=", 1)
             key = key.strip()
             value = value.strip()
 
-            if key == 'dirs':
-                # dirs can be comma-separated list, but we already split by comma
-                # So we handle dirs specially: accumulate until next key
+            if key == "dirs":
                 continue
-            elif key == 'host':
-                source['host'] = value if value else None
-            elif key == 'user':
-                source['user'] = value if value else None
-            elif key == 'tool':
-                source['tool'] = value if value else None
-            elif key == 'label':
-                source['label'] = value
+            if key == "host":
+                source["host"] = value if value else None
+            elif key == "user":
+                source["user"] = value if value else None
+            elif key == "tool":
+                source["tool"] = value if value else None
+            elif key == "label":
+                source["label"] = value
 
-    # Handle dirs specially - collect all non-key=value parts as dirs
     dirs = []
     for part in parts:
-        if '=' not in part:
-            dirs.append(part.strip())
-        elif part.strip().startswith('dirs='):
-            # dirs=value format
-            dirs_str = part.split('=', 1)[1].strip()
-            dirs.extend(d.split(',') for d in dirs_str.split(',') if d.strip())
+        if "=" not in part:
+            if part.strip():
+                dirs.append(part.strip())
+        elif part.strip().startswith("dirs="):
+            dirs_str = part.split("=", 1)[1].strip()
+            dirs.extend(d for d in dirs_str.split(",") if d.strip())
 
     if dirs:
-        source['dirs'] = dirs
+        source["dirs"] = dirs
 
     return source
+
 
 
 def get_sources(args) -> list[dict]:
     """Get sources from config file, CLI args, or defaults."""
     sources = []
-
-    # First, try config file
     config_path = Path(args.sources_file).expanduser() if args.sources_file else DEFAULT_CONFIG_PATH
 
     if config_path.exists():
@@ -306,42 +528,39 @@ def get_sources(args) -> list[dict]:
                 data = json.load(f)
                 if isinstance(data, list):
                     sources = data
-                elif isinstance(data, dict) and 'sources' in data:
-                    sources = data['sources']
+                elif isinstance(data, dict) and "sources" in data:
+                    sources = data["sources"]
         except (json.JSONDecodeError, IOError) as e:
-            print(f'Warning: could not read config {config_path}: {e}', file=sys.stderr)
+            print(f"Warning: could not read config {config_path}: {e}", file=sys.stderr)
 
-    # Add inline sources from CLI
     for source_str in args.source or []:
         sources.append(parse_inline_source(source_str))
 
-    # If still no sources, use defaults (local only, no personal info)
     if not sources:
         sources = [
             {
-                'host': None,
-                'user': None,
-                'dirs': ['~/.pi/agent/sessions'],
-                'tool': 'pi'
+                "host": None,
+                "user": None,
+                "dirs": ["~/.pi/agent/sessions"],
+                "tool": "pi",
             },
             {
-                'host': None,
-                'user': None,
-                'dirs': ['~/.claude/projects'],
-                'tool': 'claude'
-            }
+                "host": None,
+                "user": None,
+                "dirs": ["~/.claude/projects"],
+                "tool": "claude",
+            },
         ]
 
-    # Validate and fill in labels
     for source in sources:
-        if 'dirs' not in source or not source['dirs']:
-            print(f'Warning: source missing dirs: {source}', file=sys.stderr)
+        if "dirs" not in source or not source["dirs"]:
+            print(f"Warning: source missing dirs: {source}", file=sys.stderr)
             continue
-
-        if 'label' not in source:
-            source['label'] = deduce_label(source)
+        if "label" not in source:
+            source["label"] = deduce_label(source)
 
     return sources
+
 
 
 def write_example_config():
@@ -353,23 +572,24 @@ def write_example_config():
 
     example = [
         {
-            'label': 'local • pi',
-            'host': None,
-            'user': None,
-            'dirs': ['~/.pi/agent/sessions'],
-            'tool': 'pi'
+            "label": "local • pi",
+            "host": None,
+            "user": None,
+            "dirs": ["~/.pi/agent/sessions"],
+            "tool": "pi",
         },
         {
-            'label': 'local • claude',
-            'host': None,
-            'user': None,
-            'dirs': ['~/.claude/projects'],
-            'tool': 'claude'
-        }
+            "label": "local • claude",
+            "host": None,
+            "user": None,
+            "dirs": ["~/.claude/projects"],
+            "tool": "claude",
+        },
     ]
 
-    with open(DEFAULT_CONFIG_PATH, 'w') as f:
+    with open(DEFAULT_CONFIG_PATH, "w") as f:
         json.dump(example, f, indent=2)
+
 
 
 def orchestrate(pattern: str, flags: int, args) -> None:
@@ -377,48 +597,263 @@ def orchestrate(pattern: str, flags: int, args) -> None:
     sources = get_sources(args)
 
     for source in sources:
-        label = source.get('label', deduce_label(source))
+        label = source.get("label", deduce_label(source))
         hdr(label)
 
-        host = source.get('host')
-        user = source.get('user')
-        dirs = source.get('dirs', [])
-        tool_hint = source.get('tool')
+        host = source.get("host")
+        user = source.get("user")
+        dirs = source.get("dirs", [])
+        tool_hint = source.get("tool")
 
         if host is None:
-            # Local source
             expanded = [str(Path(d).expanduser()) for d in dirs]
-            worker(pattern, expanded, flags, tool_hint, '', label)
+            worker(pattern, expanded, flags, tool_hint, "", label)
             continue
 
-        # Remote source
-        ssh_host = f'{user}@{host}' if user else host
-        ssh_prefix = f'ssh -t {ssh_host}'
+        ssh_host = f"{user}@{host}" if user else host
+        ssh_prefix = f"ssh -t {ssh_host}"
 
-        remote_argv = ['python3', '-', '--worker']
+        remote_argv = ["python3", "-", "--worker"]
         if tool_hint:
-            remote_argv += ['--tool', tool_hint]
+            remote_argv += ["--tool", tool_hint]
         if flags & re.IGNORECASE:
-            remote_argv.append('--ignore-case')
-        remote_argv += ['--ssh-prefix', ssh_prefix, pattern]
-        remote_cmd = ' '.join(shlex.quote(a) for a in remote_argv) + ' ' + ' '.join(dirs)
+            remote_argv.append("--ignore-case")
+        remote_argv += ["--ssh-prefix", ssh_prefix, pattern]
+        remote_cmd = " ".join(shlex.quote(a) for a in remote_argv) + " " + " ".join(dirs)
 
         try:
-            subprocess.run(['ssh', '-q', ssh_host, remote_cmd],
-                           input=self_code.encode(), check=False)
+            subprocess.run(["ssh", "-q", ssh_host, remote_cmd], input=self_code.encode(), check=False)
         except Exception as e:
-            print(f'  {DIM}(ssh failed: {e}){RESET}')
+            print(f"  {DIM}(ssh failed: {e}){RESET}")
+
+
+
+def run_interactive(results: list[SessionResult], errors: list[SourceError], pattern: str) -> None:
+    try:
+        from textual import on
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical
+        from textual.reactive import reactive
+        from textual.widgets import Footer, Header, Input, ListItem, ListView, Static, TextArea
+    except ImportError as exc:
+        raise SystemExit(
+            "Interactive mode requires `textual` and `rich`. "
+            "Install them with: uv tool install textual rich, or run without --interactive."
+        ) from exc
+
+    class ResultItem(ListItem):
+        def __init__(self, result: SessionResult) -> None:
+            self.result = result
+            label = f"{Path(result.path).name}  [{result.match_count} hit{'s' if result.match_count != 1 else ''}]"
+            super().__init__(Static(label))
+
+    class ErrorItem(ListItem):
+        def __init__(self, error: SourceError) -> None:
+            self.error = error
+            super().__init__(Static(f"⚠ {error.source_label}"))
+
+    class SessionSearchApp(App):
+        CSS = """
+        Screen { layout: vertical; }
+        #top { height: 4; }
+        #filter { height: 3; }
+        #summary { height: 1; padding: 0 1; color: $text-muted; }
+        #body { height: 1fr; }
+        #results { width: 36; border: solid $accent; }
+        #preview { width: 1fr; border: solid $accent; }
+        #session { width: 1fr; border: solid $accent; }
+        TextArea { height: 1fr; }
+
+        /* source label as dim group header */
+        .group-header { padding: 0 1; color: $text-muted; background: $surface; }
+
+        /* error items */
+        ErrorItem { color: $error; }
+        ErrorItem > Static { color: $error; }
+        ErrorItem:focus { background: $error 20%; }
+        ErrorItem.-highlighted { background: $error 20%; }
+        """
+
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("enter", "focus_session", "Full session"),
+            Binding("tab", "focus_next", "Next pane"),
+            Binding("shift+tab", "focus_previous", "Prev pane"),
+            Binding("ctrl+r", "focus_results", "Results"),
+            Binding("ctrl+f", "focus_filter", "Filter"),
+        ]
+
+        filter_text = reactive("")
+
+        def __init__(
+            self,
+            all_results: list[SessionResult],
+            all_errors: list[SourceError],
+            query: str,
+        ) -> None:
+            super().__init__()
+            self.all_results = all_results
+            self.all_errors = all_errors
+            self.query = query
+            self.filtered_results = list(all_results)
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Vertical(id="top"):
+                yield Input(
+                    placeholder="Filter by source, title, cwd, path, or matched text",
+                    id="filter",
+                )
+                yield Static(id="summary")
+            with Horizontal(id="body"):
+                yield ListView(id="results")
+                yield TextArea("", id="preview", read_only=True)
+                yield TextArea("", id="session", read_only=True)
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.title = "session-search"
+            self.sub_title = f"query: {self.query}"
+            self.rebuild_results()
+            self.query_one("#filter", Input).focus()
+
+        def action_focus_session(self) -> None:
+            self.query_one("#session", TextArea).focus()
+
+        def action_focus_results(self) -> None:
+            self.query_one("#results", ListView).focus()
+
+        def action_focus_filter(self) -> None:
+            self.query_one("#filter", Input).focus()
+
+        @on(Input.Changed, "#filter")
+        def handle_filter(self, event: Input.Changed) -> None:
+            self.filter_text = event.value.strip().lower()
+            self.rebuild_results()
+
+        @on(ListView.Selected, "#results")
+        def handle_select(self, event: ListView.Selected) -> None:
+            item = event.item
+            if isinstance(item, ResultItem):
+                self.show_result(item.result)
+            elif isinstance(item, ErrorItem):
+                self.show_error(item.error)
+
+        def rebuild_results(self) -> None:
+            filter_text = self.filter_text
+            if filter_text:
+                self.filtered_results = [
+                    r for r in self.all_results
+                    if filter_text in " ".join([
+                        r.source_label, r.title, r.cwd, r.path, r.first_match,
+                    ]).lower()
+                ]
+                filtered_errors = [
+                    e for e in self.all_errors
+                    if filter_text in f"{e.source_label} {e.ssh_host} {e.reason}".lower()
+                ]
+            else:
+                self.filtered_results = list(self.all_results)
+                filtered_errors = list(self.all_errors)
+
+            results_view = self.query_one("#results", ListView)
+            results_view.clear()
+
+            # errors first so they're never missed
+            for error in filtered_errors:
+                results_view.append(ErrorItem(error))
+
+            # results grouped by source label
+            current_source: str | None = None
+            for result in self.filtered_results:
+                if result.source_label != current_source:
+                    current_source = result.source_label
+                    results_view.append(ListItem(Static(current_source, classes="group-header"), disabled=True))
+                results_view.append(ResultItem(result))
+
+            # summary bar
+            err_part = f"  ⚠ {len(filtered_errors)} error{'s' if len(filtered_errors) != 1 else ''}" if filtered_errors else ""
+            self.query_one("#summary", Static).update(
+                f"{len(self.filtered_results)} / {len(self.all_results)} sessions{err_part}"
+                "  ·  Left: results  Middle: hit windows  Right: full session"
+            )
+
+            # auto-select first actionable item
+            first_result = next(
+                (r for r in self.filtered_results),
+                None,
+            )
+            first_error = filtered_errors[0] if filtered_errors else None
+
+            if first_error:
+                self.show_error(first_error)
+            elif first_result:
+                self.show_result(first_result)
+                results_view.index = len(filtered_errors)  # skip error items
+            else:
+                self.query_one("#preview", TextArea).text = "No matching sessions"
+                self.query_one("#session", TextArea).text = ""
+
+        def show_result(self, result: SessionResult) -> None:
+            preview_lines = [
+                f"Source:  {result.source_label}",
+                f"Tool:    {result.tool}",
+                f"File:    {result.path}",
+                f"Cwd:     {result.cwd}",
+                f"Title:   {result.title}",
+                f"Resume:  {result.resume_command}",
+                "",
+            ]
+            for entry in result.windows:
+                if entry is None:
+                    preview_lines.append("──")
+                    continue
+                marker = "▶" if entry.role == "user" else "◀"
+                hit = ">" if entry.matched else " "
+                preview_lines.append(f"{hit} {marker} {entry.line}")
+            self.query_one("#preview", TextArea).text = "\n".join(preview_lines)
+
+            session_lines = []
+            for msg in result.messages:
+                header = "USER" if msg.role == "user" else "ASSISTANT"
+                session_lines.append(f"[{header}]")
+                session_lines.append(msg.text)
+                session_lines.append("")
+            self.query_one("#session", TextArea).text = "\n".join(session_lines).rstrip()
+
+        def show_error(self, error: SourceError) -> None:
+            self.query_one("#preview", TextArea).text = "\n".join([
+                f"⚠  Source error",
+                f"",
+                f"Source:  {error.source_label}",
+                f"Host:    {error.ssh_host}",
+                f"Reason:  {error.reason}",
+                f"",
+                error.detail or "(no further detail)",
+            ])
+            self.query_one("#session", TextArea).text = ""
+
+    SessionSearchApp(results, errors, pattern).run()
+
 
 
 def main() -> None:
     write_example_config()
 
+    try:
+        signal = __import__("signal")
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ImportError, ValueError):
+        pass
+
     ap = argparse.ArgumentParser(
-        description='Search Pi and Claude Code sessions across all hosts.',
+        description="Search Pi and Claude Code sessions across all hosts.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
+        epilog="""
 Examples:
   session-search "keyword" | less -R
+  session-search keyword --interactive
   session-search keyword --source 'host=server,user=dev,dirs=~/.pi/sessions'
   session-search keyword --sources-file ./custom-sources.json
 
@@ -432,29 +867,37 @@ Config file format (~/.config/session-search/sources.json):
       "tool": "pi"
     }
   ]
-''')
-    ap.add_argument('pattern', help='regex pattern to search for')
-    ap.add_argument('-i', '--ignore-case', action='store_true')
-    ap.add_argument('-w', '--word-regexp', action='store_true',
-                    help='match whole words only')
-    ap.add_argument('--source', action='append', metavar='SPEC',
-                    help='add source via CLI (format: host=H,user=U,dirs=D1,D2,tool=T)')
-    ap.add_argument('--sources-file', metavar='PATH',
-                    help='path to sources JSON config (default: ~/.config/session-search/sources.json)')
-    ap.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
-    ap.add_argument('--tool', choices=['pi', 'claude'], default=None, help=argparse.SUPPRESS)
-    ap.add_argument('--ssh-prefix', default='', dest='ssh_prefix', help=argparse.SUPPRESS)
-    ap.add_argument('dirs', nargs='*', help=argparse.SUPPRESS)
+""",
+    )
+    ap.add_argument("pattern", help="regex pattern to search for")
+    ap.add_argument("-i", "--ignore-case", action="store_true")
+    ap.add_argument("-w", "--word-regexp", action="store_true", help="match whole words only")
+    ap.add_argument("--interactive", action="store_true", help="open a Textual TUI for navigating results")
+    ap.add_argument("--source", action="append", metavar="SPEC",
+                    help="add source via CLI (format: host=H,user=U,dirs=D1,D2,tool=T)")
+    ap.add_argument("--sources-file", metavar="PATH",
+                    help="path to sources JSON config (default: ~/.config/session-search/sources.json)")
+    ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--dump-json", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--label", default="worker", help=argparse.SUPPRESS)
+    ap.add_argument("--tool", choices=["pi", "claude"], default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--ssh-prefix", default="", dest="ssh_prefix", help=argparse.SUPPRESS)
+    ap.add_argument("dirs", nargs="*", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     flags = re.IGNORECASE if args.ignore_case else 0
-    pat = rf'\b{re.escape(args.pattern)}\b' if args.word_regexp else args.pattern
+    pat = rf"\b{re.escape(args.pattern)}\b" if args.word_regexp else args.pattern
 
-    if args.worker:
-        worker(pat, args.dirs, flags, args.tool, args.ssh_prefix, 'worker')
+    if args.dump_json:
+        dump_json_results(pat, args.dirs, flags, args.tool, args.ssh_prefix, args.label)
+    elif args.worker:
+        worker(pat, args.dirs, flags, args.tool, args.ssh_prefix, args.label)
+    elif args.interactive:
+        all_results, all_errors = collect_results(pat, flags, args)
+        run_interactive(all_results, all_errors, args.pattern)
     else:
         orchestrate(pat, flags, args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
