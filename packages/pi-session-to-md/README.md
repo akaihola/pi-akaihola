@@ -38,23 +38,34 @@ python scripts/session-to-md.py session.jsonl -o transcript.md
 
 ### Options
 
-| Flag                | Default | Description                              |
-| ------------------- | ------- | ---------------------------------------- |
-| `--thinking`        | off     | Include thinking/reasoning blocks        |
-| `--no-tool-calls`   | off     | Omit tool calls and their results        |
-| `--no-tool-results` | off     | Omit tool results (keep calls)           |
-| `--tool-details`    | off     | Include tool-specific detail objects     |
-| `--no-metadata`     | off     | Omit the header (date, model, cwd)       |
-| `-o FILE`           | stdout  | Write output to a file instead of stdout |
+By default, only user/assistant text is included. Tool calls, tool results,
+and thinking blocks are opt-in — each rendered as a collapsible GitHub
+Markdown `<details>` block.
+
+| Flag             | Description                                                           |
+| ---------------- | --------------------------------------------------------------------- |
+| `--thinking`     | Include thinking/reasoning as expandable sections                     |
+| `--tool-calls`   | Include tool calls as expandable sections                             |
+| `--tool-results` | Include tool results as expandable sections (implies `--tool-calls`)  |
+| `--tool-details` | Include tool detail objects inside results (implies `--tool-results`) |
+| `--all`          | Include everything: thinking, tool calls, results, and details        |
+| `--no-metadata`  | Omit the header (date, model, cwd)                                    |
+| `-o FILE`        | Write output to a file instead of stdout                              |
 
 ### Examples
 
 ```bash
-# Full transcript with thinking blocks
-python scripts/session-to-md.py session.jsonl --thinking -o full.md
+# Clean transcript — just user/assistant conversation
+python scripts/session-to-md.py session.jsonl -o clean.md
 
-# Just the conversation, no tools
-python scripts/session-to-md.py session.jsonl --no-tool-calls -o clean.md
+# Add tool calls as expandable blocks
+python scripts/session-to-md.py session.jsonl --tool-calls
+
+# Add tool calls AND their results
+python scripts/session-to-md.py session.jsonl --tool-results
+
+# Full export: thinking + tools + results + details
+python scripts/session-to-md.py session.jsonl --all -o full.md
 
 # Pipe through other tools
 python scripts/session-to-md.py session.jsonl | head -100
@@ -76,10 +87,11 @@ pi -e ./packages/pi-session-to-md
 ### Slash command
 
 ```
-/session-to-md                          # export current session
+/session-to-md                          # clean transcript (conversation only)
 /session-to-md transcript.md            # specify output filename
-/session-to-md --thinking               # include thinking blocks
-/session-to-md out.md --no-tool-calls   # no tools, just conversation
+/session-to-md --thinking               # + thinking as expandable blocks
+/session-to-md --tool-results           # + tool calls & results
+/session-to-md out.md --all             # everything included
 ```
 
 ### Tool (for LLM use)
@@ -92,15 +104,16 @@ Export this session to markdown with thinking blocks included.
 
 Parameters:
 
-| Parameter     | Type    | Default             | Description                 |
-| ------------- | ------- | ------------------- | --------------------------- |
-| `output`      | string  | `session-<slug>.md` | Output file path            |
-| `session`     | string  | current session     | JSONL path or UUID prefix   |
-| `thinking`    | boolean | `false`             | Include thinking blocks     |
-| `toolCalls`   | boolean | `true`              | Include tool calls          |
-| `toolResults` | boolean | `true`              | Include tool results        |
-| `toolDetails` | boolean | `false`             | Include tool detail objects |
-| `metadata`    | boolean | `true`              | Include header metadata     |
+| Parameter     | Type    | Default             | Description                                         |
+| ------------- | ------- | ------------------- | --------------------------------------------------- |
+| `output`      | string  | `session-<slug>.md` | Output file path                                    |
+| `session`     | string  | current session     | JSONL path or UUID prefix                           |
+| `thinking`    | boolean | `false`             | Include thinking as expandable sections             |
+| `toolCalls`   | boolean | `false`             | Include tool calls as expandable sections           |
+| `toolResults` | boolean | `false`             | Include tool results (implies `toolCalls`)          |
+| `toolDetails` | boolean | `false`             | Include tool detail objects (implies `toolResults`) |
+| `all`         | boolean | `false`             | Include everything                                  |
+| `metadata`    | boolean | `true`              | Include header metadata                             |
 
 ## Output Format
 

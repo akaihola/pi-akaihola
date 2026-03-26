@@ -76,22 +76,32 @@ export default function (pi: ExtensionAPI): void {
       ),
       thinking: Type.Optional(
         Type.Boolean({
-          description: "Include thinking/reasoning blocks (default: false)",
+          description:
+            "Include thinking/reasoning blocks as expandable sections (default: false)",
         }),
       ),
       toolCalls: Type.Optional(
         Type.Boolean({
-          description: "Include tool calls (default: true)",
+          description:
+            "Include tool calls as expandable sections (default: false)",
         }),
       ),
       toolResults: Type.Optional(
         Type.Boolean({
-          description: "Include tool results (default: true)",
+          description:
+            "Include tool results as expandable sections; implies toolCalls (default: false)",
         }),
       ),
       toolDetails: Type.Optional(
         Type.Boolean({
-          description: "Include tool-specific detail objects (default: false)",
+          description:
+            "Include tool-specific detail objects inside results; implies toolResults (default: false)",
+        }),
+      ),
+      all: Type.Optional(
+        Type.Boolean({
+          description:
+            "Include everything: thinking, tool calls, tool results, and tool details",
         }),
       ),
       metadata: Type.Optional(
@@ -135,10 +145,11 @@ export default function (pi: ExtensionAPI): void {
       }
       scriptArgs.push("-o", resolve(ctx.sessionManager.getCwd(), outputPath));
 
-      // Flags
+      // Flags — all expandable sections are opt-in
+      if (args.all) scriptArgs.push("--all");
       if (args.thinking) scriptArgs.push("--thinking");
-      if (args.toolCalls === false) scriptArgs.push("--no-tool-calls");
-      if (args.toolResults === false) scriptArgs.push("--no-tool-results");
+      if (args.toolCalls) scriptArgs.push("--tool-calls");
+      if (args.toolResults) scriptArgs.push("--tool-results");
       if (args.toolDetails) scriptArgs.push("--tool-details");
       if (args.metadata === false) scriptArgs.push("--no-metadata");
 
@@ -156,9 +167,10 @@ export default function (pi: ExtensionAPI): void {
             outputPath: resolvedOut,
             sessionPath,
             flags: {
+              all: args.all ?? false,
               thinking: args.thinking ?? false,
-              toolCalls: args.toolCalls ?? true,
-              toolResults: args.toolResults ?? true,
+              toolCalls: args.toolCalls ?? false,
+              toolResults: args.toolResults ?? false,
               toolDetails: args.toolDetails ?? false,
               metadata: args.metadata ?? true,
             },
@@ -183,7 +195,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("session-to-md", {
     description:
       "Export the current session to a Markdown file. " +
-      "Usage: /session-to-md [output.md] [--thinking] [--no-tool-calls] [--no-tool-results] [--tool-details] [--no-metadata]",
+      "Usage: /session-to-md [output.md] [--thinking] [--tool-calls] [--tool-results] [--tool-details] [--all] [--no-metadata]",
     handler: async (rawArgs, ctx) => {
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (!sessionFile) {

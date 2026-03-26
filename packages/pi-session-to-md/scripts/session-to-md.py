@@ -573,13 +573,19 @@ def main() -> None:
         description="Convert a Pi agent session JSONL file to Markdown.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=dedent("""\
+            By default only user/assistant text is included.  Tool calls,
+            tool results, and thinking blocks are opt-in — each rendered
+            as a collapsible <details> block for GitHub Markdown.
+
             examples:
-              %(prog)s session.jsonl                      # file → stdout
-              %(prog)s session.jsonl -o transcript.md     # file → file
-              cat session.jsonl | %(prog)s -              # stdin → stdout
-              %(prog)s fa769cff                           # find by UUID prefix
-              %(prog)s session.jsonl --thinking            # include thinking blocks
-              %(prog)s session.jsonl --no-tool-calls       # omit tool calls & results
+              %(prog)s session.jsonl                        # clean transcript → stdout
+              %(prog)s session.jsonl -o transcript.md       # → file
+              cat session.jsonl | %(prog)s -                # stdin → stdout
+              %(prog)s fa769cff                             # find by UUID prefix
+              %(prog)s session.jsonl --thinking             # + thinking blocks
+              %(prog)s session.jsonl --tool-calls           # + tool calls
+              %(prog)s session.jsonl --tool-results         # + tool calls & results
+              %(prog)s session.jsonl --all                  # everything
         """),
     )
     parser.add_argument(
@@ -595,47 +601,37 @@ def main() -> None:
         default=None,
         help="Output file path (default: stdout)",
     )
+
+    # --- Expandable block opt-ins ---
     parser.add_argument(
         "--thinking",
         action="store_true",
         default=False,
-        help="Include thinking/reasoning blocks (default: omit)",
-    )
-    parser.add_argument(
-        "--no-thinking",
-        action="store_true",
-        default=False,
-        help="Exclude thinking blocks (default; for explicitness)",
+        help="Include thinking/reasoning blocks as expandable sections",
     )
     parser.add_argument(
         "--tool-calls",
         action="store_true",
-        default=None,
-        help="Include tool calls (default: yes)",
-    )
-    parser.add_argument(
-        "--no-tool-calls",
-        action="store_true",
         default=False,
-        help="Exclude tool calls and their results",
+        help="Include tool calls as expandable sections",
     )
     parser.add_argument(
         "--tool-results",
         action="store_true",
-        default=None,
-        help="Include tool results (default: yes)",
-    )
-    parser.add_argument(
-        "--no-tool-results",
-        action="store_true",
         default=False,
-        help="Exclude tool results (keep tool calls only)",
+        help="Include tool results as expandable sections (implies --tool-calls)",
     )
     parser.add_argument(
         "--tool-details",
         action="store_true",
         default=False,
-        help="Include tool-specific detail objects (default: omit)",
+        help="Include tool-specific detail objects inside results (implies --tool-results)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Include everything: thinking, tool calls, tool results, and tool details",
     )
     parser.add_argument(
         "--no-metadata",
@@ -662,12 +658,12 @@ def main() -> None:
         print("No entries found in input.", file=sys.stderr)
         sys.exit(1)
 
-    # --- Resolve flags ---
-    include_thinking = args.thinking and not args.no_thinking
-    include_tool_calls = not args.no_tool_calls
-    include_tool_results = not args.no_tool_results and not args.no_tool_calls
-    if args.tool_results is True:
-        include_tool_results = True
+    # --- Resolve flags (each implies the ones it depends on) ---
+    include_all = args.all
+    include_tool_details = include_all or args.tool_details
+    include_tool_results = include_all or include_tool_details or args.tool_results
+    include_tool_calls = include_all or include_tool_results or args.tool_calls
+    include_thinking = include_all or args.thinking
 
     # --- Render ---
     md = render_markdown(
@@ -675,7 +671,7 @@ def main() -> None:
         include_thinking=include_thinking,
         include_tool_calls=include_tool_calls,
         include_tool_results=include_tool_results,
-        include_tool_details=args.tool_details,
+        include_tool_details=include_tool_details,
         include_metadata=not args.no_metadata,
     )
 
