@@ -18,6 +18,10 @@ orchestrate:
 session-meta:
     pi -e ./packages/pi-session-meta
 
+# Run Pi with the session-to-md package
+session-to-md:
+    pi -e ./packages/pi-session-to-md
+
 # Run Pi with the usage-bars package
 usage-bars:
     pi -e ./packages/pi-usage-bars
