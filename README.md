@@ -1,5 +1,7 @@
 # pi-akaihola
 
+> This is a prototype developed using AI coding agents and not intended for production use.
+
 A monorepo for developing and distributing reusable Pi extension packages. Pi Pi is available here as a repo-local coding assistant to help build them.
 
 ---
